@@ -624,7 +624,7 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== АДМИНКА =====
 WAIT_TASK_TITLE, WAIT_TASK_LINK, WAIT_TASK_REWARD = range(10, 13)
 WAIT_SPONSOR_TITLE, WAIT_SPONSOR_LINK = range(13, 15)
-WAIT_SET_BONUS, WAIT_SET_REF = range(15, 17)
+WAIT_SET_BONUS, WAIT_SET_REF, WAIT_EDIT_TASK_PRICE = range(15, 18)
 
 
 def is_admin(user_id: int) -> bool:
@@ -689,33 +689,73 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_SPONSOR_TITLE
 
     if data == "admin_tasks":
-        cur.execute("SELECT id, title, reward, active FROM tasks")
-        rows = cur.fetchall()
-
-        if not rows:
-            await query.message.reply_text("Заданий нет.")
-            return ConversationHandler.END
-
-        text = "📋 Задания:\n\n"
-        for tid, title, reward, active in rows:
-            text += f"{tid}. {title} — {reward}⭐ — {'вкл' if active else 'выкл'}\n"
-
-        await query.message.reply_text(text)
+        await show_admin_tasks(query.message)
         return ConversationHandler.END
 
     if data == "admin_sponsors":
-        cur.execute("SELECT id, title, active FROM sponsors")
-        rows = cur.fetchall()
+        await show_admin_sponsors(query.message)
+        return ConversationHandler.END
 
-        if not rows:
-            await query.message.reply_text("Спонсоров нет.")
+    if data.startswith("task_manage:"):
+        task_id = int(data.split(":")[1])
+        await show_one_task(query.message, task_id)
+        return ConversationHandler.END
+
+    if data.startswith("task_delete:"):
+        task_id = int(data.split(":")[1])
+        cur.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        cur.execute("DELETE FROM completed_tasks WHERE task_id=?", (task_id,))
+        conn.commit()
+        await query.message.reply_text("🗑 Задание удалено.")
+        await show_admin_tasks(query.message)
+        return ConversationHandler.END
+
+    if data.startswith("task_toggle:"):
+        task_id = int(data.split(":")[1])
+        cur.execute("SELECT active FROM tasks WHERE id=?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            await query.message.reply_text("Задание не найдено.")
             return ConversationHandler.END
+        new_status = 0 if row[0] == 1 else 1
+        cur.execute("UPDATE tasks SET active=? WHERE id=?", (new_status, task_id))
+        conn.commit()
+        await query.message.reply_text("✅ Статус задания изменён.")
+        await show_one_task(query.message, task_id)
+        return ConversationHandler.END
 
-        text = "📋 Спонсоры:\n\n"
-        for sid, title, active in rows:
-            text += f"{sid}. {title} — {'вкл' if active else 'выкл'}\n"
+    if data.startswith("task_price:"):
+        task_id = int(data.split(":")[1])
+        context.user_data["edit_task_id"] = task_id
+        await query.message.reply_text("Введите новую цену задания:")
+        return WAIT_EDIT_TASK_PRICE
 
-        await query.message.reply_text(text)
+    if data.startswith("sponsor_manage:"):
+        sponsor_id = int(data.split(":")[1])
+        await show_one_sponsor(query.message, sponsor_id)
+        return ConversationHandler.END
+
+    if data.startswith("sponsor_delete:"):
+        sponsor_id = int(data.split(":")[1])
+        cur.execute("DELETE FROM sponsors WHERE id=?", (sponsor_id,))
+        cur.execute("DELETE FROM sponsor_checks WHERE sponsor_id=?", (sponsor_id,))
+        conn.commit()
+        await query.message.reply_text("🗑 Спонсор удалён.")
+        await show_admin_sponsors(query.message)
+        return ConversationHandler.END
+
+    if data.startswith("sponsor_toggle:"):
+        sponsor_id = int(data.split(":")[1])
+        cur.execute("SELECT active FROM sponsors WHERE id=?", (sponsor_id,))
+        row = cur.fetchone()
+        if not row:
+            await query.message.reply_text("Спонсор не найден.")
+            return ConversationHandler.END
+        new_status = 0 if row[0] == 1 else 1
+        cur.execute("UPDATE sponsors SET active=? WHERE id=?", (new_status, sponsor_id))
+        conn.commit()
+        await query.message.reply_text("✅ Статус спонсора изменён.")
+        await show_one_sponsor(query.message, sponsor_id)
         return ConversationHandler.END
 
     if data == "admin_set_bonus":
@@ -727,6 +767,121 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_SET_REF
 
     return ConversationHandler.END
+
+
+
+async def show_admin_tasks(message):
+    cur.execute("SELECT id, title, reward, active FROM tasks ORDER BY id DESC")
+    rows = cur.fetchall()
+
+    if not rows:
+        await message.reply_text("Заданий нет.")
+        return
+
+    buttons = []
+    for tid, title, reward, active in rows:
+        status = "🟢" if active else "🔴"
+        buttons.append([InlineKeyboardButton(f"{status} #{tid} {title} — {reward}⭐", callback_data=f"task_manage:{tid}")])
+
+    await message.reply_text("📋 Управление заданиями:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def show_one_task(message, task_id: int):
+    cur.execute("SELECT id, title, link, reward, active FROM tasks WHERE id=?", (task_id,))
+    row = cur.fetchone()
+
+    if not row:
+        await message.reply_text("Задание не найдено.")
+        return
+
+    tid, title, link, reward, active = row
+    status = "🟢 Включено" if active else "🔴 Выключено"
+    toggle_text = "🔴 Выключить" if active else "🟢 Включить"
+
+    text = (
+        f"📋 Задание #{tid}\\n\\n"
+        f"Название: {title}\\n"
+        f"Ссылка: {link}\\n"
+        f"Цена: {reward}⭐\\n"
+        f"Статус: {status}"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💰 Изменить цену", callback_data=f"task_price:{tid}")],
+            [InlineKeyboardButton(toggle_text, callback_data=f"task_toggle:{tid}")],
+            [InlineKeyboardButton("🗑 Удалить", callback_data=f"task_delete:{tid}")],
+            [InlineKeyboardButton("⬅️ Назад к заданиям", callback_data="admin_tasks")],
+        ]
+    )
+
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def show_admin_sponsors(message):
+    cur.execute("SELECT id, title, link, active FROM sponsors ORDER BY id DESC")
+    rows = cur.fetchall()
+
+    if not rows:
+        await message.reply_text("Спонсоров нет.")
+        return
+
+    buttons = []
+    for sid, title, link, active in rows:
+        status = "🟢" if active else "🔴"
+        buttons.append([InlineKeyboardButton(f"{status} #{sid} {title}", callback_data=f"sponsor_manage:{sid}")])
+
+    await message.reply_text("📋 Управление спонсорами:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def show_one_sponsor(message, sponsor_id: int):
+    cur.execute("SELECT id, title, link, active FROM sponsors WHERE id=?", (sponsor_id,))
+    row = cur.fetchone()
+
+    if not row:
+        await message.reply_text("Спонсор не найден.")
+        return
+
+    sid, title, link, active = row
+    status = "🟢 Включен" if active else "🔴 Выключен"
+    toggle_text = "🔴 Выключить" if active else "🟢 Включить"
+
+    text = (
+        f"📢 Спонсор #{sid}\\n\\n"
+        f"Название: {title}\\n"
+        f"Ссылка: {link}\\n"
+        f"Статус: {status}"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(toggle_text, callback_data=f"sponsor_toggle:{sid}")],
+            [InlineKeyboardButton("🗑 Удалить", callback_data=f"sponsor_delete:{sid}")],
+            [InlineKeyboardButton("⬅️ Назад к спонсорам", callback_data="admin_sponsors")],
+        ]
+    )
+
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def edit_task_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        value = float(update.message.text.replace(",", "."))
+    except Exception:
+        await update.message.reply_text("Введите число.")
+        return WAIT_EDIT_TASK_PRICE
+
+    task_id = context.user_data.get("edit_task_id")
+    if not task_id:
+        await update.message.reply_text("Задание не найдено.")
+        return ConversationHandler.END
+
+    cur.execute("UPDATE tasks SET reward=? WHERE id=?", (value, task_id))
+    conn.commit()
+
+    await update.message.reply_text(f"✅ Цена задания обновлена: {value}⭐")
+    return ConversationHandler.END
+
 
 
 async def add_task_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -860,6 +1015,7 @@ def main():
             WAIT_SPONSOR_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_sponsor_link)],
             WAIT_SET_BONUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_bonus_value)],
             WAIT_SET_REF: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_ref_value)],
+            WAIT_EDIT_TASK_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_task_price)],
         },
         fallbacks=[],
     )
@@ -885,6 +1041,7 @@ def main():
     app.add_handler(CommandHandler("setref", admin_setref_command))
 
     app.add_handler(admin_conv)
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(task_|sponsor_)"))
     app.add_handler(withdraw_conv)
 
     app.add_handler(CallbackQueryHandler(check_sponsors_callback, pattern="^check_sponsors$"))
