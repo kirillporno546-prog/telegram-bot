@@ -172,9 +172,10 @@ def get_balance(user_id: int) -> float:
 def main_keyboard():
     return ReplyKeyboardMarkup(
         [
-            ["⭐ Баланс", "⭐ Заработать звёзды"],
-            ["📋 Задания", "👥 Пригласить друзей"],
-            ["💸 Вывод", "🎁 Бонус дня"],
+            ["👤 Профиль"],
+            ["📋 Задания"],
+            ["👥 Пригласить друзей", "🎁 Бонус дня"],
+            ["💸 Вывод"],
         ],
         resize_keyboard=True,
     )
@@ -1013,7 +1014,7 @@ async def user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await balance_cmd(update, context)
     elif text == "🎁 Бонус дня":
         await daily_bonus(update, context)
-    elif text in ("📋 Задания", "⭐ Заработать звёзды"):
+    elif text == "📋 Задания":
         await tasks_menu(update, context)
     elif text == "👥 Пригласить друзей":
         await referral(update, context)
