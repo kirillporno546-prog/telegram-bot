@@ -9,8 +9,6 @@ from telegram import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BotCommand,
-    MenuButtonCommands,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -105,21 +103,11 @@ def init_db():
         user_id INTEGER,
         username TEXT,
         amount REAL,
-        gift TEXT,
         status TEXT DEFAULT 'pending',
         created_at TEXT,
         channel_message_id INTEGER
     )
     """)
-
-    # Миграции для старой базы
-    for table_name, column_name, column_sql in [
-        ("withdrawals", "gift", "gift TEXT"),
-    ]:
-        cur.execute(f"PRAGMA table_info({table_name})")
-        existing_columns = [row[1] for row in cur.fetchall()]
-        if column_name not in existing_columns:
-            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
 
     set_default("daily_bonus_reward", "0.10")
     set_default("referral_reward", "3.5")
@@ -184,10 +172,9 @@ def get_balance(user_id: int) -> float:
 def main_keyboard():
     return ReplyKeyboardMarkup(
         [
-            ["⭐ Баланс", "👤 Профиль"],
-            ["📋 Задания",
-            ["👥 Пригласить друзей", "🎁 Бонус дня"],
-            ["💸 Вывод"],
+            ["⭐ Баланс", "⭐ Заработать звёзды"],
+            ["📋 Задания", "👥 Пригласить друзей"],
+            ["💸 Вывод", "🎁 Бонус дня"],
         ],
         resize_keyboard=True,
     )
@@ -201,6 +188,7 @@ def admin_keyboard():
             [InlineKeyboardButton("➕ Добавить спонсора", callback_data="admin_add_sponsor")],
             [InlineKeyboardButton("📋 Управление спонсорами", callback_data="admin_sponsors")],
             [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
             [InlineKeyboardButton("🎁 Бонус дня", callback_data="admin_set_bonus")],
             [InlineKeyboardButton("💰 Цена реферала", callback_data="admin_set_ref")],
         ]
@@ -378,27 +366,6 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"⭐ Ваш баланс: {bal:.2f}⭐")
 
 
-async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_or_create_user(user.id, user.username)
-
-    cur.execute("SELECT balance, tasks_completed FROM users WHERE user_id=?", (user.id,))
-    row = cur.fetchone()
-    balance = float(row[0]) if row else 0.0
-    tasks_completed = int(row[1]) if row else 0
-
-    cur.execute("SELECT COUNT(*) FROM users WHERE invited_by=?", (user.id,))
-    referrals_count = cur.fetchone()[0]
-
-    await update.effective_message.reply_text(
-        "👤 Ваш профиль\n\n"
-        f"🆔 ID: {user.id}\n"
-        f"⭐ Баланс: {balance:.2f}⭐\n"
-        f"📋 Выполнено заданий: {tasks_completed}\n"
-        f"👥 Рефералов: {referrals_count}"
-    )
-
-
 async def daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_or_create_user(update.effective_user.id, update.effective_user.username)
 
@@ -444,79 +411,26 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def show_next_task(user_id: int, context: ContextTypes.DEFAULT_TYPE, message, old_message=None):
-    skipped = context.user_data.setdefault("skipped_tasks", [])
+async def tasks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_or_create_user(update.effective_user.id, update.effective_user.username)
 
-    cur.execute(
-        """
-        SELECT id, title, link, reward
-        FROM tasks
-        WHERE active=1
-          AND id NOT IN (SELECT task_id FROM completed_tasks WHERE user_id=?)
-        ORDER BY id ASC
-        """,
-        (user_id,),
-    )
+    cur.execute("SELECT id, title, link, reward FROM tasks WHERE active=1")
     tasks = cur.fetchall()
 
-    next_task = None
-    for task in tasks:
-        if task[0] not in skipped:
-            next_task = task
-            break
-
-    if not next_task:
-        if old_message:
-            try:
-                await old_message.delete()
-            except Exception:
-                pass
-        await message.reply_text("❌ Заданий больше нет")
+    if not tasks:
+        await update.effective_message.reply_text("Пока нет доступных заданий.")
         return
 
-    task_id, title, link, reward = next_task
-
-    text = (
-        "📋 Новое задание\n\n"
-        f"{title}\n\n"
-        f"⭐ Награда: {reward}⭐\n\n"
-        "Нажмите кнопку ниже, выполните задание и потом нажмите «Проверить»."
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        [
+    for task_id, title, link, reward in tasks:
+        buttons = [
             [InlineKeyboardButton("🔗 Перейти", url=link)],
             [InlineKeyboardButton("✅ Проверить", callback_data=f"check_task:{task_id}")],
-            [InlineKeyboardButton("⏭ Пропустить", callback_data=f"skip_task:{task_id}")],
         ]
-    )
 
-    if old_message:
-        try:
-            await old_message.delete()
-        except Exception:
-            pass
-
-    await message.reply_text(text, reply_markup=keyboard)
-
-
-async def tasks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_or_create_user(user.id, user.username)
-    await show_next_task(user.id, context, update.effective_message)
-
-
-async def skip_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    task_id = int(query.data.split(":")[1])
-    skipped = context.user_data.setdefault("skipped_tasks", [])
-    if task_id not in skipped:
-        skipped.append(task_id)
-
-    await show_next_task(user_id, context, query.message, old_message=query.message)
+        await update.effective_message.reply_text(
+            f"📋 Задание: {title}\n⭐ Награда: {reward}⭐",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 
 async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -539,7 +453,7 @@ async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     cur.execute("SELECT 1 FROM completed_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
     if cur.fetchone():
-        await show_next_task(user_id, context, query.message, old_message=query.message)
+        await query.message.reply_text("Вы уже выполнили это задание.")
         return
 
     channel = parse_channel_from_link(link)
@@ -569,12 +483,9 @@ async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     conn.commit()
 
-    skipped = context.user_data.setdefault("skipped_tasks", [])
-    if task_id in skipped:
-        skipped.remove(task_id)
+    await query.message.reply_text(f"✅ Задание выполнено!\n⭐ Начислено: +{reward}⭐")
 
     await give_referral_reward_if_needed(context, user_id)
-    await show_next_task(user_id, context, query.message, old_message=query.message)
 
 
 # ===== ВЫВОД =====
@@ -582,39 +493,30 @@ WAIT_WITHDRAW_AMOUNT = 1
 
 
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_or_create_user(user.id, user.username)
-    balance = get_balance(user.id)
+    get_or_create_user(update.effective_user.id, update.effective_user.username)
 
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("15⭐ (💖)", callback_data="withdraw_amount:15:💖 Сердечко"),
-                InlineKeyboardButton("15⭐ (🧸)", callback_data="withdraw_amount:15:🧸 Мишка"),
+                InlineKeyboardButton("15⭐", callback_data="withdraw_amount:15"),
+                InlineKeyboardButton("25⭐", callback_data="withdraw_amount:25"),
             ],
             [
-                InlineKeyboardButton("25⭐ (🌹)", callback_data="withdraw_amount:25:🌹 Розочка"),
-                InlineKeyboardButton("25⭐ (🎁)", callback_data="withdraw_amount:25:🎁 Подарок"),
+                InlineKeyboardButton("50⭐", callback_data="withdraw_amount:50"),
+                InlineKeyboardButton("100⭐", callback_data="withdraw_amount:100"),
             ],
-            [InlineKeyboardButton("50⭐", callback_data="withdraw_amount:50:")],
         ]
     )
 
-    await update.effective_message.reply_text(
-        "🎁 Вывести Звёзды\n\n"
-        f"Заработано: {balance:.2f}⭐\n\n"
-        f"Канал с выводами: {WITHDRAW_CHANNEL}\n\n"
-        "Выберите подарок для вывода:",
-        reply_markup=keyboard,
-    )
+    await update.effective_message.reply_text("Выберите сумму для вывода:", reply_markup=keyboard)
     return ConversationHandler.END
 
 
-async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, amount: float, gift: str, reply_target):
+async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, amount: float, reply_target):
     get_or_create_user(user.id, user.username)
 
-    if amount not in (15, 25, 50):
-        await reply_target.reply_text("❌ Выберите сумму кнопкой.")
+    if amount not in (15, 25, 50, 100):
+        await reply_target.reply_text("❌ Выберите сумму кнопкой: 15, 25, 50 или 100⭐")
         return
 
     balance = get_balance(user.id)
@@ -627,10 +529,10 @@ async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, am
 
     cur.execute(
         """
-        INSERT INTO withdrawals (user_id, username, amount, gift, status, created_at)
-        VALUES (?, ?, ?, ?, 'pending', ?)
+        INSERT INTO withdrawals (user_id, username, amount, status, created_at)
+        VALUES (?, ?, ?, 'pending', ?)
         """,
-        (user.id, user.username or "", amount, gift, datetime.utcnow().isoformat()),
+        (user.id, user.username or "", amount, datetime.utcnow().isoformat()),
     )
     withdrawal_id = cur.lastrowid
     conn.commit()
@@ -641,13 +543,9 @@ async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, am
         "💸 Новая заявка на вывод\n\n"
         f"👤 Пользователь: {username}\n"
         f"🆔 ID: {user.id}\n"
-        f"⭐ Сумма: {amount:g}⭐\n"
+        f"⭐ Сумма: {amount}⭐\n\n"
+        "Статус: ⏳ Ожидает отправки"
     )
-
-    if gift:
-        text += f"🎁 Подарок: {gift}\n"
-
-    text += "\nСтатус: ⏳ Ожидает отправки"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -666,7 +564,7 @@ async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, am
     )
     conn.commit()
 
-    await reply_target.reply_text(f"✅ Заявка на вывод {amount:g}⭐ отправлена.")
+    await reply_target.reply_text(f"✅ Заявка на вывод {amount}⭐ отправлена.")
 
 
 async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -678,10 +576,8 @@ async def withdraw_amount_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
 
-    parts = query.data.split(":", 2)
-    amount = float(parts[1])
-    gift = parts[2] if len(parts) > 2 else ""
-    await create_withdrawal_request(query.from_user, context, amount, gift, query.message)
+    amount = float(query.data.split(":")[1])
+    await create_withdrawal_request(query.from_user, context, amount, query.message)
 
 
 async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,14 +591,14 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, wid = query.data.split(":")
     wid = int(wid)
 
-    cur.execute("SELECT user_id, username, amount, status, gift FROM withdrawals WHERE id=?", (wid,))
+    cur.execute("SELECT user_id, username, amount, status FROM withdrawals WHERE id=?", (wid,))
     row = cur.fetchone()
 
     if not row:
         await query.message.reply_text("Заявка не найдена.")
         return
 
-    user_id, username, amount, status, gift = row
+    user_id, username, amount, status = row
 
     if status != "pending":
         await query.answer("Заявка уже обработана", show_alert=True)
@@ -718,9 +614,8 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Выплата отправлена\n\n"
             f"👤 Пользователь: {username_text}\n"
             f"🆔 ID: {user_id}\n"
-            f"⭐ Сумма: {amount:g}⭐\n"
-            + (f"🎁 Подарок: {gift}\n" if gift else "")
-            + "\nСтатус: ✅ Отправлено"
+            f"⭐ Сумма: {amount}⭐\n\n"
+            "Статус: ✅ Отправлено"
         )
 
         await query.message.edit_text(text)
@@ -735,9 +630,8 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Заявка отклонена\n\n"
             f"👤 Пользователь: {username_text}\n"
             f"🆔 ID: {user_id}\n"
-            f"⭐ Сумма: {amount:g}⭐\n"
-            + (f"🎁 Подарок: {gift}\n" if gift else "")
-            + "\nСтатус: ❌ Отклонено, звёзды возвращены"
+            f"⭐ Сумма: {amount}⭐\n\n"
+            "Статус: ❌ Отклонено, звёзды возвращены"
         )
 
         await query.message.edit_text(text)
@@ -750,7 +644,7 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== АДМИНКА =====
 WAIT_TASK_TITLE, WAIT_TASK_LINK, WAIT_TASK_REWARD = range(10, 13)
 WAIT_SPONSOR_TITLE, WAIT_SPONSOR_LINK = range(13, 15)
-WAIT_SET_BONUS, WAIT_SET_REF, WAIT_EDIT_TASK_PRICE = range(15, 18)
+WAIT_SET_BONUS, WAIT_SET_REF, WAIT_EDIT_TASK_PRICE, WAIT_BROADCAST_PREVIEW = range(15, 19)
 
 
 def is_admin(user_id: int) -> bool:
@@ -805,6 +699,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ Всего звёзд на балансах: {total_balance:.2f}"
         )
         return ConversationHandler.END
+
+    if data == "admin_broadcast":
+        await query.message.reply_text(
+            "📢 Отправьте сообщение для рассылки.\n\nМожно текст, фото или пост с оформлением."
+        )
+        return WAIT_BROADCAST_PREVIEW
 
     if data == "admin_add_task":
         await query.message.reply_text("Введите название задания:")
@@ -1111,8 +1011,6 @@ async def user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "⭐ Баланс":
         await balance_cmd(update, context)
-    elif text == "👤 Профиль":
-        await profile_cmd(update, context)
     elif text == "🎁 Бонус дня":
         await daily_bonus(update, context)
     elif text in ("📋 Задания", "⭐ Заработать звёзды"):
@@ -1125,11 +1023,83 @@ async def user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Выберите действие из меню.", reply_markup=main_keyboard())
 
 
-async def post_init(application):
-    await application.bot.set_my_commands([
-        BotCommand("start", "Перезапустить бота"),
-    ])
-    await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return ConversationHandler.END
+
+    context.user_data["broadcast_chat_id"] = update.effective_chat.id
+    context.user_data["broadcast_message_id"] = update.effective_message.message_id
+
+    await update.effective_message.reply_text("👀 Предпросмотр рассылки:")
+
+    await context.bot.copy_message(
+        chat_id=update.effective_chat.id,
+        from_chat_id=update.effective_chat.id,
+        message_id=update.effective_message.message_id,
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Отправить всем", callback_data="broadcast_confirm"),
+                InlineKeyboardButton("❌ Отмена", callback_data="broadcast_cancel"),
+            ]
+        ]
+    )
+
+    await update.effective_message.reply_text(
+        "Отправить это сообщение всем пользователям?",
+        reply_markup=keyboard,
+    )
+
+    return ConversationHandler.END
+
+
+async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Нет доступа", show_alert=True)
+        return
+
+    if query.data == "broadcast_cancel":
+        context.user_data.pop("broadcast_chat_id", None)
+        context.user_data.pop("broadcast_message_id", None)
+        await query.message.edit_text("❌ Рассылка отменена.")
+        return
+
+    chat_id = context.user_data.get("broadcast_chat_id")
+    message_id = context.user_data.get("broadcast_message_id")
+
+    if not chat_id or not message_id:
+        await query.message.edit_text("❌ Сообщение для рассылки не найдено.")
+        return
+
+    cur.execute("SELECT user_id FROM users")
+    users = cur.fetchall()
+
+    sent = 0
+    failed = 0
+
+    for (user_id,) in users:
+        try:
+            await context.bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=chat_id,
+                message_id=message_id,
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    context.user_data.pop("broadcast_chat_id", None)
+    context.user_data.pop("broadcast_message_id", None)
+
+    await query.message.edit_text(
+        f"✅ Рассылка завершена\n\nОтправлено: {sent}\nОшибок: {failed}"
+    )
 
 
 def main():
@@ -1138,7 +1108,7 @@ def main():
 
     init_db()
 
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_")],
@@ -1151,6 +1121,7 @@ def main():
             WAIT_SET_BONUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_bonus_value)],
             WAIT_SET_REF: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_ref_value)],
             WAIT_EDIT_TASK_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_task_price)],
+            WAIT_BROADCAST_PREVIEW: [MessageHandler(filters.ALL & ~filters.COMMAND, broadcast_preview)],
         },
         fallbacks=[],
     )
@@ -1171,7 +1142,6 @@ def main():
     app.add_handler(CommandHandler("bonus", daily_bonus))
     app.add_handler(CommandHandler("tasks", tasks_menu))
     app.add_handler(CommandHandler("ref", referral))
-    app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("setbonus", admin_setbonus_command))
     app.add_handler(CommandHandler("setref", admin_setref_command))
 
@@ -1179,9 +1149,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(task_|sponsor_)"))
     app.add_handler(withdraw_conv)
 
+    app.add_handler(CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"))
     app.add_handler(CallbackQueryHandler(check_sponsors_callback, pattern="^check_sponsors$"))
     app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task:"))
-    app.add_handler(CallbackQueryHandler(skip_task_callback, pattern="^skip_task:"))
     app.add_handler(CallbackQueryHandler(withdraw_amount_callback, pattern="^withdraw_amount:"))
     app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^withdraw_"))
 
