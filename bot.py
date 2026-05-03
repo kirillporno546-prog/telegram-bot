@@ -494,28 +494,35 @@ WAIT_WITHDRAW_AMOUNT = 1
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_or_create_user(update.effective_user.id, update.effective_user.username)
 
-    await update.effective_message.reply_text("Введите сумму для вывода:")
-    return WAIT_WITHDRAW_AMOUNT
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("15⭐", callback_data="withdraw_amount:15"),
+                InlineKeyboardButton("25⭐", callback_data="withdraw_amount:25"),
+            ],
+            [
+                InlineKeyboardButton("50⭐", callback_data="withdraw_amount:50"),
+                InlineKeyboardButton("100⭐", callback_data="withdraw_amount:100"),
+            ],
+        ]
+    )
+
+    await update.effective_message.reply_text("Выберите сумму для вывода:", reply_markup=keyboard)
+    return ConversationHandler.END
 
 
-async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def create_withdrawal_request(user, context: ContextTypes.DEFAULT_TYPE, amount: float, reply_target):
+    get_or_create_user(user.id, user.username)
 
-    try:
-        amount = float(update.message.text.replace(",", "."))
-    except Exception:
-        await update.message.reply_text("Введите число.")
-        return WAIT_WITHDRAW_AMOUNT
-
-    if amount <= 0:
-        await update.message.reply_text("Сумма должна быть больше 0.")
-        return WAIT_WITHDRAW_AMOUNT
+    if amount not in (15, 25, 50, 100):
+        await reply_target.reply_text("❌ Выберите сумму кнопкой: 15, 25, 50 или 100⭐")
+        return
 
     balance = get_balance(user.id)
 
     if balance < amount:
-        await update.message.reply_text("❌ Недостаточно звёзд для вывода")
-        return ConversationHandler.END
+        await reply_target.reply_text("❌ Недостаточно звёзд для вывода")
+        return
 
     add_balance(user.id, -amount)
 
@@ -556,8 +563,20 @@ async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     conn.commit()
 
-    await update.message.reply_text(f"✅ Заявка на вывод {amount}⭐ отправлена.")
+    await reply_target.reply_text(f"✅ Заявка на вывод {amount}⭐ отправлена.")
+
+
+async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Выберите сумму вывода кнопкой.")
     return ConversationHandler.END
+
+
+async def withdraw_amount_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    amount = float(query.data.split(":")[1])
+    await create_withdrawal_request(query.from_user, context, amount, query.message)
 
 
 async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1023,7 +1042,6 @@ def main():
     withdraw_conv = ConversationHandler(
         entry_points=[
             CommandHandler("withdraw", withdraw_start),
-            MessageHandler(filters.Regex("^💸 Вывод$"), withdraw_start),
         ],
         states={
             WAIT_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)]
@@ -1046,6 +1064,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(check_sponsors_callback, pattern="^check_sponsors$"))
     app.add_handler(CallbackQueryHandler(check_task_callback, pattern="^check_task:"))
+    app.add_handler(CallbackQueryHandler(withdraw_amount_callback, pattern="^withdraw_amount:"))
     app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^withdraw_"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text))
